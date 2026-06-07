@@ -1,0 +1,12 @@
+# Core solver (the only hard requirement to run the algorithm/tests)
+networkx>=3.0
+
+# OpenStreetMap ingestion + geometry. osmnx pulls in geopandas/shapely/rtree.
+# Pinned to the v2 line, whose API this code targets.
+osmnx>=2.0,<3.0
+
+# --- dev / test only (not needed to run the tool) ---
+# Run the suite with:  pytest
+# The solver/network/export/progress tests need only networkx (osmnx is lazy),
+# so they run fast and offline; the elevation HTTP call is mocked.
+pytest>=8.0

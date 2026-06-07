@@ -1,0 +1,25 @@
+# ─── Personal walking data — NEVER publish ───
+# Recorded GPS tracks (reveal where/when you walk + heart rate), progress
+# records, downloaded map caches, and generated walk files. All of this is
+# local — fetch/generate it yourself with the CLI.
+data/*
+cache/
+walks/
+*.gpx
+*.geojson
+*.route.json
+
+# Keep an empty data dir in the repo
+!data/.gitkeep
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# ─── Editor / OS cruft ───
+.DS_Store
+.claude/
