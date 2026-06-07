@@ -1,6 +1,6 @@
 # Amble
 
-Plans walks that cover every street, alley, and stairway in San Francisco with
+Plans walks that cover every street, alley, and stairway in San Francisco (or any other city!) with
 as little backtracking as possible. Meant for doing it over several years, a
 neighborhood at a time.
 
