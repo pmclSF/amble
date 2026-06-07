@@ -13,7 +13,7 @@ exactly in polynomial time.
 
 Zero repetition isn't possible, though. A repeat-free closed route (an Eulerian
 circuit) only exists if every intersection has an even number of streets meeting
-it, and cities are full of odd ones: dead ends, T-junctions, the tops of
+it, and cities like San Francisco are full of odd ones: dead ends, T-junctions, the tops of
 stairways. Some re-walking is forced; Amble finds the least of it and routes
 around the rest.
 
