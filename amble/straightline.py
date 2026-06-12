@@ -1,11 +1,11 @@
 """
-straightline.py — a boustrophedon ("lawnmower") router that you can follow
-without ever checking your watch.
+straightline.py — a boustrophedon ("lawnmower") router meant to be easy to
+follow on foot.
 
 Walking a city is not a mail-truck mileage problem. The Chinese-Postman solver
 (postman.py) minimises distance but produces a block-by-block zig-zag that
 crosses itself and is impossible to keep your place on — you get lost and end up
-re-walking streets. This planner instead does what a person actually wants:
+re-walking streets. This planner does the followable thing instead:
 
   * Pick ONE orientation — the N-S avenues OR the E-W streets, never both in the
     same walk (you do the cross-streets on a separate day).

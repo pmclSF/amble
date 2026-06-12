@@ -122,6 +122,33 @@ def test_stats_counts_a_corridor_once():
     assert s["total_edges"] == 2 and s["total_km"] == 0.2
 
 
+def test_walk_summary_rolls_up_by_day_named_and_total():
+    # one named block on day 1; a named block + an unnamed connector on day 2.
+    # a day's distance is all recorded edges; named_km is the coverage subset.
+    G = _g([(1, 2, {"length": 100.0, "name": "A St"}),
+            (2, 3, {"length": 300.0, "name": "B St"}),
+            (3, 4, {"length": 50.0})])                  # unnamed connector
+    store = {"walked": {
+        prog.edge_id(G, 1, 2, 0): {"date": "2026-06-06", "note": "day1"},
+        prog.edge_id(G, 2, 3, 0): {"date": "2026-06-07", "note": "morning"},
+        prog.edge_id(G, 3, 4, 0): {"date": "2026-06-07", "note": "morning"},
+    }}
+    s = prog.walk_summary(G, store)
+    assert s["n_days"] == 2
+    d0, d1 = s["days"]                                   # oldest first
+    assert d0["date"] == "2026-06-06"
+    assert round(d0["km"], 3) == 0.1 and round(d0["named_km"], 3) == 0.1
+    assert d1["date"] == "2026-06-07"
+    assert round(d1["km"], 3) == 0.35 and round(d1["named_km"], 3) == 0.3
+    assert round(s["total_km"], 3) == 0.45 and round(s["total_named_km"], 3) == 0.4
+    assert d1["notes"] == {"morning": 0.35}
+
+
+def test_walk_summary_empty_store():
+    s = prog.walk_summary(nx.MultiGraph(), {"walked": {}})
+    assert s["days"] == [] and s["total_km"] == 0.0 and s["n_days"] == 0
+
+
 def test_store_roundtrip_and_missing_file(tmp_path):
     path = tmp_path / "p.json"
     assert prog.load_store(str(path)) == {"walked": {}}

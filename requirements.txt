@@ -5,6 +5,12 @@ networkx>=3.0
 # Pinned to the v2 line, whose API this code targets.
 osmnx>=2.0,<3.0
 
+# --- map rendering (optional; only for `render` and `import --map`) ---
+# Imported lazily inside amble.render, so the rest of the tool and the whole
+# test suite still run without them.
+matplotlib>=3.7
+pillow>=10.0          # JPEG writing for matplotlib's savefig
+
 # --- dev / test only (not needed to run the tool) ---
 # Run the suite with:  pytest
 # The solver/network/export/progress tests need only networkx (osmnx is lazy),

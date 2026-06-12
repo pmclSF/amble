@@ -1,5 +1,5 @@
 """
-export.py — turn a solved route into files you can actually use:
+export.py — turn a solved route into files you can load and follow:
 
   * GPX  — load into a phone GPS app (OsmAnd, Gaia GPS, Organic Maps) and
            follow the track turn by turn.

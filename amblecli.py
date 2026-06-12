@@ -33,6 +33,8 @@ import sys
 from amble import network as net
 from amble import postman
 from amble import progress as prog
+from amble import trace
+from amble import render
 from amble import export as exp
 from amble import straightline
 from amble import contour
@@ -44,6 +46,62 @@ def _fmt(stats):
     return (f"{stats['walked_km']:.1f} / {stats['total_km']:.1f} km "
             f"({stats['pct_done']:.1f}%)  |  "
             f"{stats['walked_edges']}/{stats['total_edges']} segments")
+
+
+def _today():
+    import datetime
+    return datetime.date.today().isoformat()
+
+
+def _fmt_date(iso):
+    """ISO date -> a human label for the map, e.g. '2026-06-07' -> 'June 7, 2026'."""
+    import datetime
+    try:
+        d = datetime.date.fromisoformat(iso)
+    except (ValueError, TypeError):
+        return iso or ""
+    return f"{d.strftime('%B')} {d.day}, {d.year}"
+
+
+def _slug(text):
+    keep = [c.lower() if c.isalnum() else "-" for c in text]
+    return "".join(keep).strip("-").replace("--", "-") or "walk"
+
+
+def _redact_zones(a):
+    """Privacy zones (lat, lon, radius_m) to hide from the map. Read from a
+    gitignored privacy file (default maps/privacy.json) plus any --hide flags, so
+    a home address never lives in committed code. File format:
+        {"hide": [{"lat": .., "lon": .., "radius_m": 200, "label": "home"}]}
+    """
+    zones = []
+    path = getattr(a, "privacy", None)
+    if path and os.path.exists(path):
+        with open(path) as f:
+            for z in json.load(f).get("hide", []):
+                zones.append((float(z["lat"]), float(z["lon"]),
+                              float(z.get("radius_m", 200.0))))
+    for h in getattr(a, "hide", None) or []:
+        lat, lon = (float(x) for x in h.split(","))
+        zones.append((lat, lon, float(getattr(a, "hide_radius", 200.0))))
+    return zones
+
+
+def _progress_update(G, store, date=None):
+    """A short 'how far have I come' blurb: the given day's new distance (if any)
+    plus the running total and city coverage. Printed after import/done."""
+    summ = prog.walk_summary(G, store)
+    st = prog.stats(G, store)
+    lines = []
+    today = next((d for d in summ["days"] if d["date"] == date), None)
+    if today:
+        lines.append(f"  {today['date']}: covered {today['km']:.2f} km of new "
+                     f"streets ({today['named_km']:.2f} km named)")
+    lines.append(f"  total: {summ['total_km']:.1f} km of streets over "
+                 f"{summ['n_days']} day(s)  ·  city coverage "
+                 f"{st['pct_done']:.1f}% ({st['walked_km']:.1f}/"
+                 f"{st['total_km']:.0f} km named)")
+    return "\n".join(lines)
 
 
 def _warn_store_mismatch(G, store):
@@ -119,6 +177,12 @@ def cmd_status(a):
     store = prog.load_store(a.store)
     _warn_store_mismatch(G, store)
     print(_fmt(prog.stats(G, store)))
+    summ = prog.walk_summary(G, store)
+    if summ["n_days"]:
+        last = summ["days"][-1]
+        print(f"  {summ['total_km']:.1f} km of streets covered over "
+              f"{summ['n_days']} day(s); latest {last['date']} "
+              f"(+{last['km']:.2f} km)")
 
 
 def cmd_remaining(a):
@@ -300,6 +364,54 @@ def cmd_done(a):
     n = prog.mark_route_walked(store, G, route, when=a.date, note=a.note or "")
     prog.save_store(store, a.store)
     print(f"Marked {n} new segments walked. Now at {_fmt(prog.stats(G, store))}")
+    print(_progress_update(G, store, a.date or _today()))
+
+
+def cmd_import(a):
+    """Map-match a RECORDED .gpx track log (from your phone) and mark it walked.
+    Unlike `done`, which records a route `plan` made, this matches a noisy GPS
+    trace onto the network — snapping each fix to the nearest street and joining
+    consecutive fixes along the shortest path, skipping GPS dropouts."""
+    G = net.largest_component(_load_cached(a.cache))
+    store = prog.load_store(a.store)
+    _warn_store_mismatch(G, store)
+    pts = trace.parse_gpx(a.gpx)
+    if not pts:
+        print(f"No track points found in {a.gpx} — nothing to import.")
+        return
+    note = a.note or trace.track_name(a.gpx) or os.path.basename(a.gpx)
+    m = trace.match_trace(G, pts)
+    before = prog.walked_id_set(store)
+    new_named = sum(1 for eid, (_L, req) in m["edge_meta"].items()
+                    if req and eid not in before)
+    n = prog.mark_edges_walked(store, m["edge_ids"], when=a.date, note=note)
+    prog.save_store(store, a.store)
+    print(f"Imported {a.gpx!r} as \"{note}\"")
+    print(f"  {m['n_points']} GPS fixes -> {m['n_snapped']} snapped nodes, "
+          f"{m['n_skipped']} segments skipped (GPS gaps)")
+    print(f"  matched {len(m['edge_ids'])} edges / {m['matched_m']/1000:.2f} km "
+          f"({m['named_m']/1000:.2f} km named)")
+    print(f"  newly marked walked: {n} edges ({new_named} named)")
+    print(_progress_update(G, store, a.date or _today()))
+    if a.map:
+        out = os.path.join(a.maps_dir, f"{a.date or _today()}-{_slug(note)}.jpg")
+        render.render_coverage(G, store, out, focus=False, mode="total",
+                               redact=_redact_zones(a),
+                               date_label=_fmt_date(a.date or _today()))
+        print(f"  map -> {out}")
+
+
+def cmd_render(a):
+    """Render the coverage map (whole city, walked total) to a JPEG on demand."""
+    G = net.largest_component(_load_cached(a.cache))
+    store = prog.load_store(a.store)
+    _warn_store_mismatch(G, store)
+    date = a.date or _today()
+    out = a.out or os.path.join(a.maps_dir, f"coverage_{date}.jpg")
+    render.render_coverage(G, store, out, title=a.title, focus=a.focus,
+                           mode=("by_walk" if a.by_walk else "total"),
+                           redact=_redact_zones(a), date_label=_fmt_date(date))
+    print(f"Coverage map -> {out}  ({_fmt(prog.stats(G, store))})")
 
 
 def cmd_elevation(a):
@@ -321,6 +433,25 @@ def cmd_map(a):
     )
     print(f"Progress map -> {a.out}  ({_fmt(prog.stats(G, store))})")
     print("Open it at https://geojson.io to see walked vs remaining.")
+
+
+def cmd_log(a):
+    """A walk diary: per-day new street covered, with running totals."""
+    G = net.largest_component(_load_cached(a.cache))
+    store = prog.load_store(a.store)
+    _warn_store_mismatch(G, store)
+    summ = prog.walk_summary(G, store)
+    st = prog.stats(G, store)
+    if not summ["days"]:
+        print("No walks recorded yet.")
+        return
+    print(f"Walk log — {summ['total_km']:.1f} km of streets covered over "
+          f"{summ['n_days']} day(s)\n")
+    for d in summ["days"]:
+        walks = ", ".join(sorted(d["notes"])) if d["notes"] else f"{d['edges']} segments"
+        print(f"  {d['date']}   {d['km']:6.2f} km  ({d['named_km']:5.2f} km named)"
+              f"   {walks}")
+    print(f"\nCity coverage: {_fmt(st)}")
 
 
 def main():
@@ -390,11 +521,59 @@ def main():
     d.add_argument("--note", default=None)
     d.set_defaults(func=cmd_done)
 
+    im = sub.add_parser("import",
+                        help="map-match a recorded .gpx track log and mark it walked")
+    im.add_argument("--cache", required=True)
+    im.add_argument("--store", required=True)
+    im.add_argument("--gpx", required=True, help="a recorded GPS track (.gpx)")
+    im.add_argument("--date", default=None, help="walk date (default: today)")
+    im.add_argument("--note", default=None,
+                    help="default: the GPX track name, else the file name")
+    im.add_argument("--map", action="store_true",
+                    help="also render a whole-city coverage JPEG into --maps-dir")
+    im.add_argument("--maps-dir", default="maps", dest="maps_dir",
+                    help="folder for rendered maps (default: maps/)")
+    im.add_argument("--privacy", default="maps/privacy.json",
+                    help="gitignored JSON of zones to hide from the map")
+    im.add_argument("--hide", action="append", metavar="LAT,LON",
+                    help="also hide a zone at this point (repeatable)")
+    im.add_argument("--hide-radius", type=float, default=200.0, dest="hide_radius",
+                    help="radius in metres for --hide zones (default 200)")
+    im.set_defaults(func=cmd_import)
+
     m = sub.add_parser("map", help="export a walked-vs-remaining GeoJSON map")
     m.add_argument("--cache", required=True)
     m.add_argument("--store", required=True)
     m.add_argument("--out", required=True)
     m.set_defaults(func=cmd_map)
+
+    rn = sub.add_parser("render", help="render a coverage map to a JPEG (matplotlib)")
+    rn.add_argument("--cache", required=True)
+    rn.add_argument("--store", required=True)
+    rn.add_argument("--out", default=None,
+                    help="output path (default: maps/coverage_<date>.jpg)")
+    rn.add_argument("--maps-dir", default="maps", dest="maps_dir",
+                    help="folder for the dated default filename (default: maps/)")
+    rn.add_argument("--title", default="",
+                    help="optional header text (default: none)")
+    rn.add_argument("--date", default=None,
+                    help="date stamped on the map + in the filename (ISO yyyy-mm-dd)")
+    rn.add_argument("--focus", action="store_true",
+                    help="crop to the walked area (default: show the whole city)")
+    rn.add_argument("--by-walk", action="store_true", dest="by_walk",
+                    help="colour each walk separately (default: one walked total)")
+    rn.add_argument("--privacy", default="maps/privacy.json",
+                    help="gitignored JSON of zones to hide from the map")
+    rn.add_argument("--hide", action="append", metavar="LAT,LON",
+                    help="also hide a zone at this point (repeatable)")
+    rn.add_argument("--hide-radius", type=float, default=200.0, dest="hide_radius",
+                    help="radius in metres for --hide zones (default 200)")
+    rn.set_defaults(func=cmd_render)
+
+    lg = sub.add_parser("log", help="walk diary: per-day distance covered + totals")
+    lg.add_argument("--cache", required=True)
+    lg.add_argument("--store", required=True)
+    lg.set_defaults(func=cmd_log)
 
     rm = sub.add_parser("remaining", help="list the named ways you still need to walk")
     rm.add_argument("--cache", required=True)

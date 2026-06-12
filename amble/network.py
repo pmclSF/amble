@@ -1,6 +1,6 @@
 """
 network.py — get the walkable network from OpenStreetMap and slice it into
-pieces small enough to actually walk in a day.
+pieces small enough to walk in a day.
 
 Requires osmnx (`pip install osmnx`) and network access to the Overpass API.
 The heavy geo dependency is imported lazily so the solver can be unit-tested

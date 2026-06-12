@@ -1,10 +1,10 @@
 """
 contour.py — hill handling.
 
-Deep exploration (contour bands, descent-ordering, explicit spiral) all lost to
+Contour bands, descent-ordering, and an explicit spiral all did worse than
 plain efficient coverage, because the straight-preferring Euler trail already
-rides a hill's contour ring-roads as long swirls and concentrates the
-unavoidable turns on the spurs. So hills don't get a special router — they get
+rides a hill's contour ring-roads as long swirls and puts the unavoidable turns
+on the spurs. So hills don't get a special router — they get
 ``efficient`` coverage started at the TOP, plus an optional stair-preferred
 "approach" path so the GPX can guide you up to the summit first.
 

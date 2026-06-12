@@ -158,6 +158,58 @@ def walked_id_set(store: dict) -> set:
     return set(store.get("walked", {}).keys())
 
 
+def walk_summary(G: nx.MultiGraph, store: dict) -> dict:
+    """
+    Per-day rollup of covered street + grand totals, for "how far have I come"
+    reporting (a day's distance, the running total, days out).
+
+    Each edge is counted once, on the date it was FIRST recorded — so a day's
+    distance is the NEW street it covered (re-walking a block adds nothing). Both
+    all recorded edges (named ways + the connectors between them, ~ what you
+    actually walked) and the NAMED subset (what counts toward 100%) are reported.
+
+    Returns: ``days`` (list, oldest first) of
+    ``{date, km, named_km, edges, notes: {note: km}}``, plus ``total_km``,
+    ``total_named_km``, ``total_edges`` and ``n_days``.
+    """
+    walked = store.get("walked", {})
+    meta = {}  # eid -> (length_m, is_required); only edges present in this graph
+    for u, v, key, data in G.edges(keys=True, data=True):
+        eid = edge_id(G, u, v, key)
+        if eid in walked:
+            meta[eid] = (data.get("length", 0.0), is_required(data))
+
+    days = {}
+    for eid, rec in walked.items():
+        length, req = meta.get(eid, (0.0, False))
+        d = days.setdefault(rec.get("date", "?"),
+                            {"date": rec.get("date", "?"), "m": 0.0,
+                             "named_m": 0.0, "edges": 0, "notes_m": {}})
+        d["m"] += length
+        d["named_m"] += length if req else 0.0
+        d["edges"] += 1
+        note = rec.get("note", "")
+        if note:
+            d["notes_m"][note] = d["notes_m"].get(note, 0.0) + length
+
+    day_list = []
+    for d in (days[k] for k in sorted(days)):
+        day_list.append({
+            "date": d["date"],
+            "km": d["m"] / 1000.0,
+            "named_km": d["named_m"] / 1000.0,
+            "edges": d["edges"],
+            "notes": {n: m / 1000.0 for n, m in d["notes_m"].items()},
+        })
+    return {
+        "days": day_list,
+        "total_km": sum(d["km"] for d in day_list),
+        "total_named_km": sum(d["named_km"] for d in day_list),
+        "total_edges": sum(d["edges"] for d in day_list),
+        "n_days": len(day_list),
+    }
+
+
 def remaining_subgraph(G: nx.MultiGraph, store: dict,
                        required_only: bool = False) -> nx.MultiGraph:
     """

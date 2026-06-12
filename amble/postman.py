@@ -3,10 +3,9 @@ postman.py — Undirected Chinese Postman (Route Inspection) solver.
 
 Given an undirected (multi)graph whose edges carry a numeric ``length``
 attribute, produce a closed walk that traverses every edge AT LEAST once
-while minimising the total length walked. Because real street networks
-always contain odd-degree nodes (dead ends, T-junctions, the tops of
-staircases), *some* repetition is mathematically unavoidable — this solver
-finds the provably minimal amount of it.
+while minimising the total length walked. Real street networks always have
+odd-degree nodes (dead ends, T-junctions, the tops of staircases), so some
+repetition is forced; this solver finds the least possible.
 
 The algorithm (classic, polynomial-time for the undirected case):
 

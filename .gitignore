@@ -5,12 +5,17 @@
 data/*
 cache/
 walks/
+maps/*
 *.gpx
 *.geojson
 *.route.json
+*.jpg
+*.jpeg
+*.png
 
-# Keep an empty data dir in the repo
+# Keep empty data + maps dirs in the repo
 !data/.gitkeep
+!maps/.gitkeep
 
 # ─── Python ───
 __pycache__/

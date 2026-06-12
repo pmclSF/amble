@@ -1,15 +1,13 @@
 """
 coverage.py — Rural-Postman coverage of the must-walk (named) ways.
 
-The earlier efficient planner induced a NAMED-ONLY subgraph and ran the Chinese
-Postman on its largest connected component. But named ways connect *through*
-unnamed paths, so the named-only graph fractures into islands (Buena Vista: 22
-of them) — and the planner could only ever reach the biggest, stranding the
-rest and disagreeing with the progress denominator.
+A named-only subgraph won't do on its own: named ways connect *through* unnamed
+paths, so it fractures into islands (Buena Vista has 22). Run a solver on just
+the largest component and you strand the rest, and the covered total no longer
+matches the progress denominator.
 
-This solves the right problem: the **Rural Postman Problem** — cover a REQUIRED
-subset of edges (the unwalked named ways) while using the FULL connected graph
-for connectors. Named islands are stitched together with shortest paths through
+This is the Rural Postman Problem: cover a required subset of edges (the
+unwalked named ways) while using the full connected graph for connectors. Named islands are stitched together with shortest paths through
 unnamed pavement, so one walk is geographically continuous and every named way
 is reachable. Output is the solve_route dict shape; required = named coverage,
 everything else (connectors, backtracking) = deadhead.
