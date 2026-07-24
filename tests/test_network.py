@@ -17,6 +17,15 @@ def test_nearest_node_returns_closest_and_respects_lat_lon():
     assert net.nearest_node(G, 37.7531, -122.5049) == "near"
 
 
+def test_tag_schema_stamp_records_requested_way_and_node_tags():
+    G = nx.MultiGraph()
+    net.stamp_tag_schema(G)
+    way = set(G.graph["amble_retained_way_tags"].split("|"))
+    node = set(G.graph["amble_retained_node_tags"].split("|"))
+    assert {"foot", "indoor", "man_made", "public_transport"} <= way
+    assert {"barrier", "access"} <= node
+
+
 def test_chunk_contains_start_is_connected_and_sized():
     G = coord_grid(6)              # 60 edges, 1 m each
     chunk = net.chunk_from_node(G, (0, 0), target_km=0.01)  # 10 m target
@@ -133,6 +142,14 @@ def test_collapse_keeps_a_named_street():
     assert n == 1
     kept = {d.get("name") for _, _, d in H.edges(data=True)}
     assert "Beach Path" in kept          # the named rail survived
+
+
+def test_collapse_drops_parallel_unnamed_footway_over_named_street():
+    G = _divided(name1="Church St", hw2="footway")
+    H, n = net.collapse_divided_ways(G)
+    assert n == 1
+    assert all(d.get("name") != "Church St" or d.get("highway") != "footway"
+               for _, _, d in H.edges(data=True))
 
 
 def test_collapse_never_deletes_a_named_way():

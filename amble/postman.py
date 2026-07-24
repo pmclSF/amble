@@ -267,6 +267,7 @@ def solve_route(
                 key, _ = _min_parallel_edge(G, x, y, weight)
                 data = dict(G[x][y][key])
                 data["deadhead"] = True
+                data["_source_key"] = key
                 H.add_edge(x, y, **data)
 
     # 5. (optional) force the route to START at a specific node -------------- #
@@ -285,6 +286,7 @@ def solve_route(
                 key, _ = _min_parallel_edge(G, x, y, weight)
                 data = dict(G[x][y][key])
                 data["deadhead"] = True
+                data["_source_key"] = key
                 H.add_edge(x, y, **data)
 
     # 6. Eulerian path or circuit (straight-preferring) --------------------- #
@@ -306,7 +308,11 @@ def solve_route(
     route = []
     for u, v, key in circuit_edges:
         is_dead = bool(H[u][v][key].get("deadhead", False))
-        route.append((u, v, key, is_dead))
+        # A duplicate has a synthetic MultiGraph key in H.  Export the exact
+        # physical source key so GPX/GeoJSON never fall back to a different
+        # parallel carriageway, road, or staircase.
+        out_key = H[u][v][key].get("_source_key", key)
+        route.append((u, v, out_key, is_dead))
 
     total_m = req_m + deadhead_m
     return {

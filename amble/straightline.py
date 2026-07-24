@@ -113,7 +113,7 @@ def _name_key(data):
 
 
 def plan_boustrophedon(G, start=None, target_km=8.0, axis="ns", weight="length",
-                       straight_km=1.5, done=None):
+                       straight_km=1.5, done=None, _tried_axes=None):
     """
     Snake-walk one orientation. ``axis`` is "ns" (avenues) or "ew" (streets).
     A grid-aligned band ``straight_km`` long (in the walk direction) is taken
@@ -192,8 +192,15 @@ def plan_boustrophedon(G, start=None, target_km=8.0, axis="ns", weight="length",
             streets.append({"name": nm, "edges": edges, "ends": (ea, eb),
                             "len": length, "pos": pos, "nodes": set(nodes)})
     if not streets:
+        tried = set(_tried_axes or ()) | {axis}
+        other_axis = "ew" if axis == "ns" else "ns"
+        if other_axis in tried:
+            return {"route": [], "required_m": 0.0, "deadhead_m": 0.0,
+                    "total_m": 0.0, "efficiency": 1.0,
+                    "n_odd_nodes": 0, "endpoints": (start, start),
+                    "n_streets": 0, "axis_deg": round(target, 1)}
         return plan_boustrophedon(G, start, target_km,
-                                  "ew" if axis == "ns" else "ns", weight, straight_km)
+                                  other_axis, weight, straight_km, done, tried)
 
     streets.sort(key=lambda s: s["pos"])   # from the start side outward
 
@@ -219,27 +226,36 @@ def plan_boustrophedon(G, start=None, target_km=8.0, axis="ns", weight="length",
             break
         i += step
 
-    # 4. walk each chosen street end to end, entering at the nearer end (this is
-    #    what makes it snake), with a shortest-path connector (deadhead) between
-    cur = start if (start is not None and start in G) else chosen[0]["ends"][0]
-    first = cur
-    route, deadhead_m, required_m = [], 0.0, 0.0
-    for st in chosen:
-        dist, paths = nx.single_source_dijkstra(G, cur, weight=weight)
-        ea, eb = st["ends"]
-        entry = ea if dist.get(ea, math.inf) <= dist.get(eb, math.inf) else eb
-        if entry != cur and entry in paths:
-            p = paths[entry]
-            for x, y in zip(p[:-1], p[1:]):
-                k = _minkey(G, x, y, weight)
-                deadhead_m += G[x][y][k].get(weight, 0.0)
-                route.append((x, y, k, True))
-        edges = st["edges"] if entry == ea else _reverse(st["edges"])
-        for (u, v, k) in edges:
-            required_m += min((d.get(weight, 0.0) for d in G[u][v].values()),
-                              default=0.0)
-            route.append((u, v, k, False))
-        cur = eb if entry == ea else ea
+    # 4. Assemble using real connector distance, then trim whole streets until
+    # the requested TOTAL walking budget is respected.  The first indivisible
+    # street may exceed a very small target, but connectors are never silently
+    # added on top of an already-full required-distance budget.
+    def assemble(selection):
+        cur = start if (start is not None and start in G) else selection[0]["ends"][0]
+        first = cur
+        route, deadhead_m, required_m = [], 0.0, 0.0
+        for st in selection:
+            dist, paths = nx.single_source_dijkstra(G, cur, weight=weight)
+            ea, eb = st["ends"]
+            entry = ea if dist.get(ea, math.inf) <= dist.get(eb, math.inf) else eb
+            if entry != cur and entry in paths:
+                p = paths[entry]
+                for x, y in zip(p[:-1], p[1:]):
+                    k = _minkey(G, x, y, weight)
+                    deadhead_m += G[x][y][k].get("length", 0.0)
+                    route.append((x, y, k, True))
+            edges = st["edges"] if entry == ea else _reverse(st["edges"])
+            for (u, v, k) in edges:
+                required_m += G[u][v][k].get("length", 0.0)
+                route.append((u, v, k, False))
+            cur = eb if entry == ea else ea
+        return route, required_m, deadhead_m, first, cur
+
+    route, required_m, deadhead_m, first, cur = assemble(chosen)
+    target_total_m = max(0.1, target_km) * 1000.0
+    while len(chosen) > 1 and required_m + deadhead_m > target_total_m:
+        chosen.pop()
+        route, required_m, deadhead_m, first, cur = assemble(chosen)
 
     total_m = required_m + deadhead_m
     return {

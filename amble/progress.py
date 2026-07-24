@@ -38,8 +38,43 @@ def edge_id(G, u, v, key) -> str:
     handled separately by `migrate` (a tolerant MATCH on name + nearest midpoint,
     see rekey_store/_best_match) — fuzzy matching is right there, wrong for identity.
     """
+    try:
+        cid = G[u][v][key].get("coverage_id")
+    except (KeyError, TypeError):
+        cid = None
+    if cid:
+        return str(cid)
+    return legacy_edge_id(u, v, key)
+
+
+def legacy_edge_id(u, v, key) -> str:
+    """Pre-canonical edge identity, retained for reading existing stores."""
     a, b = sorted((u, v), key=str)
     return f"{a}-{b}-{key}"
+
+
+def canonical_intervals(G, u, v, intervals):
+    """Orient fractional evidence by geographic endpoint, not graph direction."""
+    try:
+        pu = (float(G.nodes[u]["y"]), float(G.nodes[u]["x"]))
+        pv = (float(G.nodes[v]["y"]), float(G.nodes[v]["x"]))
+    except (KeyError, TypeError, ValueError):
+        pu, pv = str(u), str(v)
+    if pu <= pv:
+        return [[lo, hi] for lo, hi in intervals]
+    return [[1.0 - hi, 1.0 - lo] for lo, hi in intervals]
+
+
+# bus_stop is a point feature OSM sometimes imports as a named "way"
+# (e.g. "7th Street & Brannan Street") — never a walkable street.
+NON_WALKABLE_HIGHWAYS = {"bus_stop"}
+
+# Dedicated bus-rapid-transit guideways you can't walk. Matched by NAME, not by
+# highway=busway: OSM tags transit-lane segments of REAL streets (Market, Judah,
+# Church, The Embarcadero…) as busway too, and those streets are very much walked.
+# Only the standalone guideways carry these names. Confirmed absent from SF's
+# official Street Names + TIGER road lists.
+NON_WALKABLE_NAMES = {"Van Ness Bus Rapid Transit", "Transbay Bus Ramp"}
 
 
 def is_required(data) -> bool:
@@ -48,14 +83,114 @@ def is_required(data) -> bool:
     named park path). Unnamed ways (sidewalks, crossings, desire lines, minor
     connectors) are walked only as connectors and don't count toward 100%.
 
-    Exception: a declared CORRIDOR (e.g. the Great Highway's four overlapping
-    names — see equivalents.py) counts ONCE. Only its canonical name is required;
-    the redundant aliases are optional connectors, so you walk the strip once
-    instead of four times. Everything not declared keeps the plain "named" rule.
+    Two carve-outs:
+      * things you can't walk never count, even when named — bus_stop labels
+        (NON_WALKABLE_HIGHWAYS) and dedicated BRT guideways (NON_WALKABLE_NAMES).
+      * a declared CORRIDOR (e.g. the Great Highway's overlapping names — see
+        equivalents.py) counts ONCE. Only its canonical name is required; the
+        redundant aliases are optional connectors, so you walk the strip once
+        instead of two-to-four times. Everything else keeps the plain "named" rule.
     """
+    if "coverage_required" in data:
+        return bool(data.get("coverage_required"))
     from .equivalents import canonical_name
+    h = data.get("highway")
+    hset = set(h) if isinstance(h, list) else {h}
+    if hset & NON_WALKABLE_HIGHWAYS:
+        return False
     name = _edge_name(data)
-    return bool(name) and canonical_name(name) == name
+    if not name or name in NON_WALKABLE_NAMES:
+        return False
+    return canonical_name(name) == name
+
+
+def _records_for_edge(G, u, v, key, store):
+    """Records supporting one canonical passage, including legacy aliases."""
+    walked = store.get("walked", {})
+    data = G[u][v][key]
+    ids = [edge_id(G, u, v, key)]
+    aliases = data.get("coverage_alias_ids") or []
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    ids.extend(str(x) for x in aliases)
+    # The representative's own old edge ID may predate alias annotation.
+    ids.append(legacy_edge_id(u, v, key))
+    out, seen = [], set()
+    for eid in ids:
+        if eid not in seen and eid in walked:
+            out.append(walked[eid]); seen.add(eid)
+    return out
+
+
+def _combined_record(records):
+    """Union evidence records for a canonical target without losing legacy data."""
+    if not records:
+        return None
+    intervals = []
+    for rec in records:
+        if not isinstance(rec, dict) or rec.get("intervals") is None:
+            intervals.append([0.0, 1.0])
+        else:
+            intervals.extend(rec.get("intervals") or [])
+    first = min((r for r in records if isinstance(r, dict)),
+                key=lambda r: r.get("date", ""), default={})
+    out = dict(first)
+    out["intervals"] = _merge_intervals(intervals)
+    return out
+
+
+# ── Interval (fractional) coverage ──────────────────────────────────────────
+# A street block (edge) is NOT all-or-nothing. We record WHICH fraction of its
+# 0->1 length the GPS has swept, accumulated across walks: walk half today and
+# the rest next month and the intervals union to a finished block. A block is
+# DONE once its covered length reaches within COMPLETE_END_TOL_M of full (GPS
+# never quite reaches the two corners) — length-aware so a short stairway isn't
+# held to the same fraction as a long boulevard — but never from less than
+# COMPLETE_MIN_FRAC, so a stray perpendicular crossing can't complete a block.
+COMPLETE_END_TOL_M = 15.0
+COMPLETE_MIN_FRAC = 0.5
+
+
+def _merge_intervals(intervals):
+    """Union [lo, hi] fraction ranges into minimal disjoint ranges."""
+    out = []
+    for lo, hi in sorted([min(a, b), max(a, b)] for a, b in intervals):
+        if out and lo <= out[-1][1] + 1e-9:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return out
+
+
+def coverage_frac(rec) -> float:
+    """Fraction (0..1) of an edge walked across all recorded walks. A legacy
+    record (no ``intervals`` key — the old binary schema) means fully walked."""
+    if isinstance(rec, dict):
+        intervals = rec.get("intervals")
+        if intervals is None:
+            return 1.0
+    else:
+        intervals = rec
+    return min(1.0, sum(hi - lo for lo, hi in _merge_intervals(intervals))) if intervals else 0.0
+
+
+def is_complete(rec, length_m: float) -> bool:
+    need = max(COMPLETE_MIN_FRAC, 1.0 - COMPLETE_END_TOL_M / max(float(length_m), 1.0))
+    return coverage_frac(rec) >= need
+
+
+def completed_id_set(G, store: dict) -> set:
+    """edge_ids that are fully walked (DONE). Needs G for each edge's length."""
+    walked = store.get("walked", {})
+    out = set()
+    for u, v, key, data in G.edges(keys=True, data=True):
+        if not is_required(data):
+            continue
+        eid = edge_id(G, u, v, key)
+        rec = _combined_record(_records_for_edge(G, u, v, key, store))
+        if rec is not None and is_complete(rec, data.get("length", 0.0)):
+            out.add(eid)
+    return out
 
 
 def _midpoint(G, u, v):
@@ -75,6 +210,8 @@ def _edge_index(G):
     from collections import defaultdict
     idx = defaultdict(list)
     for u, v, k, d in G.edges(keys=True, data=True):
+        if G.graph.get("amble_model") == "canonical-passages-v1" and not is_required(d):
+            continue
         idx[_edge_name(d)].append(
             (edge_id(G, u, v, k), _midpoint(G, u, v), d.get("length", 0.0)))
     return idx
@@ -100,61 +237,118 @@ def rekey_store(store: dict, Gold, Gnew):
     edge are MERGED (kept once), never silently overwritten.
     """
     new_idx = _edge_index(Gnew)
-    old_geo = {edge_id(Gold, u, v, k):
-               (_edge_name(d), _midpoint(Gold, u, v), d.get("length", 0.0))
-               for u, v, k, d in Gold.edges(keys=True, data=True)}
+    old_geo = {}
+    for u, v, k, d in Gold.edges(keys=True, data=True):
+        info = (_edge_name(d), _midpoint(Gold, u, v), d.get("length", 0.0))
+        old_geo[edge_id(Gold, u, v, k)] = info
+        old_geo[legacy_edge_id(u, v, k)] = info
     walked, migrated, not_found, merged = {}, 0, 0, 0
+    unmatched = {}
     for key, rec in store.get("walked", {}).items():
         info = old_geo.get(key)
         match = _best_match(*info, new_idx) if info else None
         if match is None:
             not_found += 1
+            unmatched[key] = rec
         elif match in walked:
             merged += 1
+            walked[match] = _combined_record([walked[match], rec])
         else:
             walked[match] = rec
             migrated += 1
-    return {"walked": walked}, migrated, not_found, merged
+    out = dict(store)
+    out["walked"] = walked
+    if unmatched:
+        out["migration_unmatched"] = unmatched
+    out["schema_version"] = 2
+    return out, migrated, not_found, merged
 
 
 def load_store(path: str) -> dict:
     if os.path.exists(path):
         with open(path) as f:
-            return json.load(f)
-    return {"walked": {}}
+            store = json.load(f)
+    else:
+        store = {"walked": {}}
+    # Migrate the old binary schema ({eid: {date, note}}) to interval coverage:
+    # an edge that was marked walked under the old rule is treated as fully done.
+    for rec in store.get("walked", {}).values():
+        if isinstance(rec, dict) and "intervals" not in rec:
+            rec["intervals"] = [[0.0, 1.0]]
+    return store
 
 
 def save_store(store: dict, path: str):
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    with open(path, "w") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(store, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def record_spans(store: dict, edge_spans, when: str | None = None, note="") -> int:
+    """Union each ``{edge_id: (lo, hi)}`` swept fraction-span into the store. Walk
+    part of a block now and the rest later and the intervals accumulate toward a
+    completed block. Returns the number of edges that gained NEW coverage."""
+    when = when or _dt.date.today().isoformat()
+    walked = store.setdefault("walked", {})
+    gained = 0
+    for eid, span in edge_spans.items():
+        # Accept either one [lo, hi] pair or a list of disjoint pairs.
+        spans = span
+        if (isinstance(span, (list, tuple)) and len(span) == 2
+                and all(isinstance(x, (int, float)) for x in span)):
+            spans = [span]
+        clean = [[max(0.0, min(1.0, float(lo))),
+                  max(0.0, min(1.0, float(hi)))] for lo, hi in spans]
+        rec = walked.get(eid)
+        if rec is None:
+            walked[eid] = {"intervals": _merge_intervals(clean),
+                           "date": when, "note": note}
+            gained += 1
+        else:
+            before = coverage_frac(rec)
+            existing = rec.get("intervals")
+            if existing is None:                  # legacy fully-walked record
+                existing = [[0.0, 1.0]]
+            rec["intervals"] = _merge_intervals(existing + clean)
+            rec["last_date"] = when
+            if coverage_frac(rec) > before + 1e-6:
+                gained += 1
+    return gained
 
 
 def mark_route_walked(store: dict, G, route, when: str | None = None, note=""):
-    """Mark every NON-deadhead edge in a solved route as walked."""
-    when = when or _dt.date.today().isoformat()
-    n = 0
-    for (u, v, key, dead) in route:
-        if dead:
-            continue  # a repeat of a street already covered by its first pass
-        eid = edge_id(G, u, v, key)
-        if eid not in store["walked"]:
-            store["walked"][eid] = {"date": when, "note": note}
-            n += 1
-    return n
+    """Mark every canonical passage physically traversed by a confirmed route.
+
+    In a prepared graph, ``deadhead`` means repeat/connector overhead, not "was
+    not walked".  An incomplete named passage used as a connector still earns
+    coverage.  Unannotated legacy/test graphs preserve the former behavior.
+    """
+    spans = {}
+    for u, v, key, dead in route:
+        try:
+            data = G[u][v][key]
+        except (KeyError, TypeError):
+            continue
+        if data.get("coverage_id"):
+            spans[edge_id(G, u, v, key)] = (0.0, 1.0)
+        elif not dead:
+            spans[edge_id(G, u, v, key)] = (0.0, 1.0)
+    return record_spans(store, spans, when, note)
 
 
 def mark_edges_walked(store: dict, edge_ids, when: str | None = None, note=""):
-    when = when or _dt.date.today().isoformat()
-    n = 0
-    for eid in edge_ids:
-        if eid not in store["walked"]:
-            store["walked"][eid] = {"date": when, "note": note}
-            n += 1
-    return n
+    """Mark whole edges fully walked (0->1). For when the walked extent is the
+    entire edge; partial GPS coverage should use ``record_spans`` instead."""
+    return record_spans(store, {eid: (0.0, 1.0) for eid in edge_ids}, when, note)
 
 
 def walked_id_set(store: dict) -> set:
+    """Every edge with ANY recorded coverage (complete or partial). For 'done'
+    only, use completed_id_set(G, store)."""
     return set(store.get("walked", {}).keys())
 
 
@@ -173,15 +367,30 @@ def walk_summary(G: nx.MultiGraph, store: dict) -> dict:
     ``total_named_km``, ``total_edges`` and ``n_days``.
     """
     walked = store.get("walked", {})
-    meta = {}  # eid -> (length_m, is_required); only edges present in this graph
+    # Canonical target -> representative length, requirement, combined evidence.
+    meta = {}
     for u, v, key, data in G.edges(keys=True, data=True):
+        if not is_required(data):
+            continue
         eid = edge_id(G, u, v, key)
-        if eid in walked:
-            meta[eid] = (data.get("length", 0.0), is_required(data))
+        rec = _combined_record(_records_for_edge(G, u, v, key, store))
+        if rec is not None:
+            meta[eid] = (data.get("length", 0.0), True, rec)
+
+    # Preserve historical diary entries for explicitly recorded unnamed
+    # connectors on unprepared/legacy graphs.  Canonical coverage percentages do
+    # not use these; actual GPX distance is reported separately by import.
+    for u, v, key, data in G.edges(keys=True, data=True):
+        if is_required(data) or data.get("coverage_id"):
+            continue
+        eid = legacy_edge_id(u, v, key)
+        rec = walked.get(eid)
+        if rec is not None:
+            meta[eid] = (data.get("length", 0.0), False, rec)
 
     days = {}
-    for eid, rec in walked.items():
-        length, req = meta.get(eid, (0.0, False))
+    for eid, (length, req, rec) in meta.items():
+        length *= coverage_frac(rec)          # credit only the fraction walked
         d = days.setdefault(rec.get("date", "?"),
                             {"date": rec.get("date", "?"), "m": 0.0,
                              "named_m": 0.0, "edges": 0, "notes_m": {}})
@@ -217,12 +426,12 @@ def remaining_subgraph(G: nx.MultiGraph, store: dict,
     keeps just the unwalked NAMED ways — the coverage target — which is what the
     routers chew on (they use the full graph for connectors separately).
     """
-    walked = walked_id_set(store)
+    done = completed_id_set(G, store)         # partially-walked blocks still remain
     R = nx.MultiGraph()
     for u, v, key, data in G.edges(keys=True, data=True):
         if required_only and not is_required(data):
             continue
-        if edge_id(G, u, v, key) not in walked:
+        if edge_id(G, u, v, key) not in done:
             R.add_node(u, **G.nodes[u])
             R.add_node(v, **G.nodes[v])
             R.add_edge(u, v, key=key, **data)
@@ -232,23 +441,37 @@ def remaining_subgraph(G: nx.MultiGraph, store: dict,
 def stats(G: nx.MultiGraph, store: dict) -> dict:
     """Progress over the must-walk set (named ways only); 100% = every named
     way walked. Unnamed connectors are ignored here."""
-    walked = walked_id_set(store)
-    total_m = walked_m = 0.0
-    total_e = walked_e = 0
+    total_m = covered_m = complete_m = 0.0
+    total_e = complete_e = partial_e = 0
     for u, v, key, data in G.edges(keys=True, data=True):
         if not is_required(data):
             continue
         L = data.get("length", 0.0)
         total_m += L
         total_e += 1
-        if edge_id(G, u, v, key) in walked:
-            walked_m += L
-            walked_e += 1
+        rec = _combined_record(_records_for_edge(G, u, v, key, store))
+        if rec is None:
+            continue
+        f = coverage_frac(rec)
+        covered_m += L * f
+        if is_complete(rec, L):
+            complete_m += L
+            complete_e += 1
+        elif f > 0:
+            partial_e += 1
     return {
         "total_km": total_m / 1000.0,
-        "walked_km": walked_m / 1000.0,
-        "remaining_km": (total_m - walked_m) / 1000.0,
+        # Headline completeness is block-complete distance.  Observed partial
+        # evidence remains visible separately but cannot produce a misleading
+        # sub-100% "nothing left" state.
+        "walked_km": complete_m / 1000.0,
+        "covered_km": covered_m / 1000.0,
+        "complete_km": complete_m / 1000.0,
+        "remaining_km": (total_m - complete_m) / 1000.0,
         "total_edges": total_e,
-        "walked_edges": walked_e,
-        "pct_done": (walked_m / total_m * 100.0) if total_m else 0.0,
+        "walked_edges": complete_e,        # "segments" = fully-done blocks
+        "complete_edges": complete_e,
+        "partial_edges": partial_e,
+        "pct_done": (complete_m / total_m * 100.0) if total_m else 0.0,
+        "observed_pct": (covered_m / total_m * 100.0) if total_m else 0.0,
     }

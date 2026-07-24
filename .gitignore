@@ -28,3 +28,6 @@ venv/
 # ─── Editor / OS cruft ───
 .DS_Store
 .claude/
+
+# ─── Local assistant context (personal; references home location) ───
+CLAUDE.md

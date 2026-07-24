@@ -1,5 +1,6 @@
 # Core solver (the only hard requirement to run the algorithm/tests)
 networkx>=3.0
+requests>=2.31
 
 # OpenStreetMap ingestion + geometry. osmnx pulls in geopandas/shapely/rtree.
 # Pinned to the v2 line, whose API this code targets.

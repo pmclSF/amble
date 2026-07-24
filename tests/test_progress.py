@@ -152,9 +152,84 @@ def test_walk_summary_empty_store():
 def test_store_roundtrip_and_missing_file(tmp_path):
     path = tmp_path / "p.json"
     assert prog.load_store(str(path)) == {"walked": {}}
-    store = {"walked": {"a~b|X|5": {"date": "2026-06-06", "note": "hi"}}}
+    # a new (interval) store round-trips byte-identical
+    store = {"walked": {"a~b|X|5": {"intervals": [[0.0, 1.0]],
+                                    "date": "2026-06-06", "note": "hi"}}}
     prog.save_store(store, str(path))
     assert prog.load_store(str(path)) == store
+
+
+def test_load_store_migrates_old_binary_records(tmp_path):
+    # an OLD binary record (no "intervals") is migrated on load to fully walked,
+    # so existing stores keep counting as done under the interval model.
+    path = tmp_path / "old.json"
+    prog.save_store({"walked": {"a-b-0": {"date": "2026-06-06", "note": "hi"}}}, str(path))
+    loaded = prog.load_store(str(path))
+    assert loaded["walked"]["a-b-0"]["intervals"] == [[0.0, 1.0]]
+    assert prog.coverage_frac(loaded["walked"]["a-b-0"]) == 1.0
+
+
+def test_merge_intervals_unions_overlapping_and_touching():
+    assert prog._merge_intervals([[0.0, 0.4], [0.4, 0.7], [0.9, 1.0]]) == [[0.0, 0.7], [0.9, 1.0]]
+    assert prog._merge_intervals([[0.6, 0.2]]) == [[0.2, 0.6]]   # normalises lo<=hi
+
+
+def _one_named_edge(length=100.0):
+    G = nx.MultiGraph()
+    G.add_node(0, x=0.0, y=0.0)
+    G.add_node(1, x=0.001, y=0.0)
+    G.add_edge(0, 1, length=length, name="Main St")
+    return G, prog.edge_id(G, 0, 1, 0)
+
+
+def test_half_now_half_later_completes_a_block():
+    G, eid = _one_named_edge(100.0)
+    store = {"walked": {}}
+    prog.record_spans(store, {eid: (0.0, 0.5)}, when="2026-06-01")
+    assert prog.coverage_frac(store["walked"][eid]) == 0.5
+    assert not prog.is_complete(store["walked"][eid], 100.0)        # half: not done
+    prog.record_spans(store, {eid: (0.45, 1.0)}, when="2026-06-08")  # the other half later
+    assert prog.coverage_frac(store["walked"][eid]) == 1.0
+    assert prog.is_complete(store["walked"][eid], 100.0)            # finished by accumulation
+    st = prog.stats(G, store)
+    assert st["complete_edges"] == 1 and st["partial_edges"] == 0
+
+
+def test_brief_touch_does_not_complete_a_block():
+    G, eid = _one_named_edge(100.0)
+    store = {"walked": {}}
+    prog.record_spans(store, {eid: (0.0, 0.08)})                     # a crossing / brief pass
+    assert not prog.is_complete(store["walked"][eid], 100.0)
+    st = prog.stats(G, store)
+    assert st["complete_edges"] == 0 and st["partial_edges"] == 1
+
+
+def test_stats_credits_partial_coverage_fractionally():
+    G = nx.MultiGraph()
+    for i, x in enumerate([0.0, 0.001, 0.002]):
+        G.add_node(i, x=x, y=0.0)
+    G.add_edge(0, 1, length=100.0, name="A St")
+    G.add_edge(1, 2, length=100.0, name="B St")
+    a, b = prog.edge_id(G, 0, 1, 0), prog.edge_id(G, 1, 2, 0)
+    store = {"walked": {}}
+    prog.record_spans(store, {a: (0.0, 1.0), b: (0.0, 0.5)})
+    st = prog.stats(G, store)
+    assert abs(st["covered_km"] - 0.15) < 1e-6        # 100 m + half of 100 m
+    assert abs(st["walked_km"] - 0.1) < 1e-6         # headline counts completed blocks
+    assert st["pct_done"] == 50.0
+    assert st["observed_pct"] == 75.0
+    assert st["complete_edges"] == 1                  # A done
+    assert st["partial_edges"] == 1                   # B half-walked, still remaining
+
+
+def test_endpoint_tolerance_completion_counts_full_block_in_headline():
+    G, eid = _one_named_edge(100.0)
+    store = {"walked": {eid: {"intervals": [[0.0, 0.85]], "date": "x"}}}
+    assert prog.is_complete(store["walked"][eid], 100.0)
+    st = prog.stats(G, store)
+    assert st["pct_done"] == 100.0
+    assert st["walked_km"] == st["total_km"] == 0.1
+    assert prog.remaining_subgraph(G, store, required_only=True).number_of_edges() == 0
 
 
 def test_rekey_store_carries_across_renumbering():
@@ -180,6 +255,22 @@ def test_rekey_store_merges_not_overwrites_on_collision():
                         prog.edge_id(Gold, 1, 2, 1): {"date": "y"}}}
     new, mig, lost, merged = prog.rekey_store(store, Gold, Gnew)
     assert mig == 1 and merged == 1 and len(new["walked"]) == 1
+
+
+def test_rekey_collision_unions_complementary_partial_evidence():
+    Gold = nx.MultiGraph()
+    Gold.add_node(1, x=0.0, y=0.0); Gold.add_node(2, x=0.0, y=0.001)
+    Gold.add_edge(1, 2, key=0, length=100.0, name="A St")
+    Gold.add_edge(1, 2, key=1, length=100.0, name="A St")
+    Gnew = _g([(1, 2, {"length": 100.0, "name": "A St"})])
+    store = {"walked": {
+        prog.edge_id(Gold, 1, 2, 0): {"intervals": [[0.0, 0.5]], "date": "x"},
+        prog.edge_id(Gold, 1, 2, 1): {"intervals": [[0.5, 1.0]], "date": "y"},
+    }}
+    new, _mig, _lost, merged = prog.rekey_store(store, Gold, Gnew)
+    rec = next(iter(new["walked"].values()))
+    assert merged == 1
+    assert prog.coverage_frac(rec) == 1.0
 
 
 def test_rekey_store_tolerant_to_realistic_drift():

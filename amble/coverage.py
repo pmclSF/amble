@@ -32,7 +32,8 @@ def _len(G, u, v, k, weight):
     return min((d.get(weight, 0.0) for d in G[u][v].values()), default=0.0)
 
 
-def plan_coverage(G, walked_ids, start=None, target_km=8.0, weight="length"):
+def plan_coverage(G, walked_ids, start=None, target_km=8.0, weight="length",
+                  open_route=True):
     """
     Rural-Postman coverage of unwalked NAMED ways near ``start``, using the full
     connected graph ``G`` for connectors. ``start`` may be the highest unwalked
@@ -99,7 +100,7 @@ def plan_coverage(G, walked_ids, start=None, target_km=8.0, weight="length"):
         # always taken so a walk is never empty.
         u, v, k = remaining[best_c]
         projected = total + 2.0 * best_d + _len(G, u, v, k, weight)
-        if required_set and projected > 1.8 * target_m:
+        if required_set and projected > target_m:
             break
         remaining.pop(best_c)
         for x, y in zip(paths[best_entry][:-1], paths[best_entry][1:]):
@@ -116,7 +117,7 @@ def plan_coverage(G, walked_ids, start=None, target_km=8.0, weight="length"):
         blob |= set(paths[best_entry]) | {u, v}
 
     # 4. Chinese-Postman the connected structure, starting at the top/your spot.
-    sol = solve_route(H, weight=weight, open_route=True,
+    sol = solve_route(H, weight=weight, open_route=open_route,
                       force_start=start if start in H else None)
 
     # 5. re-flag: a traversal counts as COVERAGE only if it's a required named

@@ -14,19 +14,90 @@ import math
 import networkx as nx
 
 
+RETAINED_WAY_TAGS = {
+    "highway", "name", "official_name", "alt_name", "old_name", "loc_name",
+    "service", "footway", "sidewalk", "surface", "access", "foot", "barrier",
+    "amenity", "parking", "parking:lane", "parking:both", "indoor",
+    "building", "covered", "bridge", "tunnel", "layer", "level",
+    "man_made", "area", "junction", "railway", "public_transport",
+    "aeroway", "conveying",
+}
+RETAINED_NODE_TAGS = {"barrier", "access", "foot", "entrance"}
+
+# The Overpass filter that defines the COVERAGE UNIVERSE, versioned so a cache
+# records which definition built it.
+#
+# osmnx's network_type="walk" is NOT faithful for a named-passage inventory:
+#  * it drops roadway centerlines tagged sidewalk=separate — exactly the
+#    micromapped downtown/boulevard corridors (O'Farrell, Sansome, Ashbury,
+#    Van Ness, Marina Blvd, Waverly Place all vanish);
+#  * it drops foot=no divided carriageways (Sunset Blvd, Park Presidio), whose
+#    NAME a walker still owes via the parallel sidewalk/sidepath;
+#  * it never downloads ways without a highway tag at all (man_made=pier).
+# So we download a superset — every non-motorway road/path plus piers — and
+# let amble.passages decide target vs. exclusion with full tag context.
+COVERAGE_FILTER_VERSION = "amble-coverage-v2"
+COVERAGE_OSM_FILTERS = [
+    ('["highway"~"trunk|primary|secondary|tertiary|unclassified|residential|'
+     'living_street|service|pedestrian|footway|path|steps|track|bridleway|'
+     'corridor|cycleway|busway|bus_guideway|trunk_link|primary_link|'
+     'secondary_link|tertiary_link"]["area"!~"yes"]'),
+    '["man_made"="pier"]',
+]
+
+
+def stamp_tag_schema(G):
+    """Record which OSM tags + Overpass filter the downloader used."""
+    G.graph["amble_retained_way_tags"] = "|".join(sorted(RETAINED_WAY_TAGS))
+    G.graph["amble_retained_node_tags"] = "|".join(sorted(RETAINED_NODE_TAGS))
+    G.graph["amble_osm_filter"] = COVERAGE_FILTER_VERSION
+    return G
+
+
 def _ox():
     import osmnx as ox  # lazy import
     # Cache Overpass responses so re-runs are instant and reproducible.
     ox.settings.use_cache = True
     ox.settings.log_console = False
-    # Pin the way tags we filter on, so a slim global config can't silently turn
-    # drop_driveways into a no-op (it keys on 'service'; we also keep 'name').
-    ox.settings.useful_tags_way = sorted(set(list(ox.settings.useful_tags_way) +
-        ["highway", "name", "service", "footway", "surface", "access"]))
-    # 'walk' is bidirectional by default in osmnx>=2, and the 'walk' filter
-    # already includes footways, paths, pedestrian areas AND highway=steps
-    # (the famous SF staircases). One-way directionality is ignored for walking.
+    # Pin the way tags we filter on, so a slim global config cannot silently
+    # turn passage classification into a no-op.
+    # Retain every tag needed to decide whether a named passage is public and
+    # whether overlapping geometries are the same physical block.  These tags
+    # must be present in the GraphML snapshot: they cannot be recovered later
+    # from a slim cache.
+    ox.settings.useful_tags_way = sorted(
+        set(ox.settings.useful_tags_way) | RETAINED_WAY_TAGS)
+    ox.settings.useful_tags_node = sorted(
+        set(ox.settings.useful_tags_node) | RETAINED_NODE_TAGS)
+    # One-way directionality is ignored for walking: every load converts to an
+    # undirected graph, so the download's oneway handling is irrelevant.
     return ox
+
+
+def _download(ox, cache_path, fetch):
+    """Shared download path: coverage filter, name-faithful simplification.
+
+    ``simplify=False`` + an explicit simplify_graph(edge_attrs_differ=["name"])
+    keeps block merging from gluing DIFFERENTLY NAMED ways into one edge
+    (osmnx's default simplification produced name-list edges like
+    ['Sunset Boulevard', 'Taraval Street'], silently misattributing distance
+    to whichever name came first). ``retain_all=True`` keeps components that
+    are unreachable on foot from the mainland (Treasure Island / Yerba Buena
+    have named streets and belong in the denominator; planning already picks
+    a connected component per walk).
+    """
+    # Preserve name AND highway-class boundaries: merging a street into its
+    # same-named steps/track continuation produced highway lists that
+    # reclassified whole blended blocks (103 m of Oneida Avenue as
+    # "staircase") and broke divided-pair merging via class mismatch.
+    G = ox.simplification.simplify_graph(
+        fetch(custom_filter=COVERAGE_OSM_FILTERS, simplify=False,
+              retain_all=True),
+        edge_attrs_differ=["name", "highway"])
+    G = stamp_tag_schema(G)
+    os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+    ox.save_graphml(G, cache_path)
+    return G
 
 
 # --------------------------------------------------------------------------- #
@@ -43,10 +114,8 @@ def load_or_download(place: str, cache_path: str) -> nx.MultiGraph:
     if os.path.exists(cache_path):
         G = ox.load_graphml(cache_path)
     else:
-        G_dir = ox.graph_from_place(place, network_type="walk", simplify=True)
-        os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
-        ox.save_graphml(G_dir, cache_path)
-        G = G_dir
+        G = _download(ox, cache_path, fetch=lambda **kw:
+                      ox.graph_from_place(place, **kw))
     return ox.convert.to_undirected(G)
 
 
@@ -56,9 +125,8 @@ def load_or_download_polygon(polygon, cache_path: str) -> nx.MultiGraph:
     if os.path.exists(cache_path):
         G = ox.load_graphml(cache_path)
     else:
-        G = ox.graph_from_polygon(polygon, network_type="walk", simplify=True)
-        os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
-        ox.save_graphml(G, cache_path)
+        G = _download(ox, cache_path, fetch=lambda **kw:
+                      ox.graph_from_polygon(polygon, **kw))
     return ox.convert.to_undirected(G)
 
 
@@ -86,9 +154,9 @@ _DRIVEWAY_SERVICES = {"driveway", "parking_aisle", "drive-through", "drive_throu
 
 def drop_driveways(G: nx.MultiGraph):
     """
-    Remove driveway / parking-aisle / drive-through edges (OSM service=*), which
-    the 'walk' network includes but you don't actually want to walk. Alleys are
-    kept. Returns (filtered_graph, n_edges_removed).
+    Legacy narrow helper: remove driveway / parking-aisle / drive-through edges
+    (OSM service=*), named or unnamed. Alleys are kept. New code should call
+    :func:`filter_non_public`, which also handles access and parking facilities.
     """
     def services(d):
         sv = d.get("service")
@@ -96,16 +164,69 @@ def drop_driveways(G: nx.MultiGraph):
             return set(sv)
         return {sv} if sv else set()
 
-    # never drop a NAMED way, even if it's tagged service=driveway/parking_aisle
-    # (e.g. a named lane) — that would silently remove a must-walk street.
     rm = [(u, v, k) for u, v, k, d in G.edges(keys=True, data=True)
-          if services(d) & _DRIVEWAY_SERVICES and not d.get("name")]
+          if services(d) & _DRIVEWAY_SERVICES]
     if not rm:
         return G, 0
     H = G.copy()
     H.remove_edges_from(rm)
     H.remove_nodes_from([n for n in list(H.nodes) if H.degree(n) == 0])
     return H, len(rm)
+
+
+def filter_non_public(G: nx.MultiGraph):
+    """Remove known non-public/parking routing surfaces, named or not.
+
+    Coverage classification and routing legality must agree: a parking ramp is
+    neither a target nor a shortcut.  Ambiguous ways are retained; only explicit
+    exclusions from :mod:`amble.passages` are removed.  Returns
+    ``(filtered_graph, audit_by_reason)``.
+    """
+    from collections import defaultdict
+    from .equivalents import out_of_scope
+    from .passages import exclusion_reason
+
+    def _midpoint(u, v):
+        try:
+            return ((float(G.nodes[u]["y"]) + float(G.nodes[v]["y"])) / 2.0,
+                    (float(G.nodes[u]["x"]) + float(G.nodes[v]["x"])) / 2.0)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    audit = defaultdict(lambda: {"edges": 0, "m": 0.0})
+    remove = []
+    for u, v, k, data in G.edges(keys=True, data=True):
+        reason = exclusion_reason(data)
+        if not reason:
+            mid = _midpoint(u, v)
+            if mid is not None and out_of_scope(*mid):
+                reason = "out_of_scope"
+        if reason:
+            remove.append((u, v, k))
+            audit[reason]["edges"] += 1
+            audit[reason]["m"] += float(data.get("length", 0.0) or 0.0)
+    if not remove:
+        return G, {}
+    H = G.copy()
+    H.remove_edges_from(remove)
+    H.remove_nodes_from([n for n in list(H.nodes) if H.degree(n) == 0])
+    return H, dict(audit)
+
+
+def prepare_graph(G: nx.MultiGraph):
+    """Build the detailed routing graph and canonical coverage inventory.
+
+    Returns ``(prepared_graph, audit)``.  Detailed public sidewalks/crossings are
+    retained for routing; canonical passage annotation, rather than destructive
+    geometric collapse, controls the coverage denominator.
+    """
+    from .passages import annotate_passages
+
+    H, removed = filter_non_public(G)
+    H, passages = annotate_passages(H)
+    H.graph["amble_model"] = "canonical-passages-v1"
+    H.graph["amble_passage_audit"] = passages
+    return H, {"removed": removed, "passages": passages}
 
 
 def _is_steps(d):
@@ -120,6 +241,14 @@ def _is_trail(d):
     h = d.get("highway")
     h = set(h) if isinstance(h, list) else {h}
     return "path" in h
+
+
+def _is_road_or_street(d):
+    """Road/street-like edges that should dominate over sidewalk shadows."""
+    h = d.get("highway")
+    hset = set(h) if isinstance(h, list) else {h}
+    return not bool(hset & {"footway", "path", "pedestrian", "steps", "cycleway",
+                            "corridor", "crossing", "construction"})
 
 
 def collapse_divided_ways(G: nx.MultiGraph, max_offset_m: float = 20.0,
@@ -216,7 +345,19 @@ def collapse_divided_ways(G: nx.MultiGraph, max_offset_m: float = 20.0,
                     ni, nj = name_of(*e["e"]), name_of(*f["e"])
                     if ni is not None and nj is not None:
                         continue
-                    if ni is None:
+                    # Prefer a road/street over a parallel unnamed footway when the
+                    # pair is effectively the same corridor. That collapses the
+                    # sidewalk shadow to the street, which is what the walk goal wants.
+                    de = G[e["e"][0]][e["e"][1]][e["e"][2]]
+                    df = G[f["e"][0]][f["e"][1]][f["e"][2]]
+                    if ni is None and nj is None:
+                        if _is_road_or_street(de) and not _is_road_or_street(df):
+                            drop_idx, drop = j, f["e"]
+                        elif _is_road_or_street(df) and not _is_road_or_street(de):
+                            drop_idx, drop = i, e["e"]
+                        else:
+                            drop_idx, drop = i, e["e"]
+                    elif ni is None:
                         drop_idx, drop = i, e["e"]
                     else:
                         drop_idx, drop = j, f["e"]

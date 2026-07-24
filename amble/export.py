@@ -273,6 +273,8 @@ def progress_to_geojson(G, walked_ids, edge_id_fn, path):
     """
     feats = []
     for u, v, key, data in G.edges(keys=True, data=True):
+        if G.graph.get("amble_model") == "canonical-passages-v1" and not data.get("coverage_required"):
+            continue
         eid = edge_id_fn(u, v, key)
         feats.append({
             "type": "Feature",

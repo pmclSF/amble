@@ -65,6 +65,16 @@ def test_parallel_keys_both_in_trail():
     assert keys == {0, 1}, f"both parallel streets must be covered, got keys {keys}"
 
 
+def test_deadhead_duplicate_keeps_exact_physical_parallel_key():
+    G = nx.MultiGraph()
+    G.add_edge("A", "B", key=0, length=100.0, name="long")
+    G.add_edge("A", "B", key=5, length=50.0, name="medium")
+    G.add_edge("A", "B", key=7, length=10.0, name="short")
+    result = solve_route(G, open_route=False)
+    dead = [e for e in result["route"] if e[3]]
+    assert dead == [("B", "A", 7, True)] or dead == [("A", "B", 7, True)]
+
+
 def _sharp_turns(G, route):
     n = 0
     for (a, b, _k, _d), (c, d, _k2, _d2) in zip(route, route[1:]):

@@ -26,6 +26,8 @@ STREET = "#46526a"          # brighter than the background so the grid reads cle
 INK = "#e6edf3"
 MUTED = "#8b98a9"
 WALKED = "#ef4444"          # single highlight colour for the running total
+PARTIAL = "#f25c3c"         # in-progress: walked part-way (a warm red-orange, reads
+                            # close to done so a corridor still looks continuous)
 
 # a calm, high-contrast cycle, used only in per-walk mode
 PALETTE = [
@@ -73,12 +75,15 @@ def _seg_in_zone(seg, zones):
 
 def build_layers(G, store, redact=None):
     """
-    Pure geometry split for the map. Returns ``(base_segs, layers, bbox)``:
+    Pure geometry split for the map. Returns ``(base_segs, partial_segs, layers, bbox)``:
 
-      base_segs : coordinate paths for every UNwalked edge (plus any walked edge
-                  inside a ``redact`` zone, demoted to look unwalked)
-      layers    : per-walk ``{note, color, label, km, segs}``, in walk-date order
-      bbox      : ``(minx, maxx, miny, maxy)`` over the SHOWN walked edges, or None
+      base_segs   : coordinate paths for every UNwalked edge (plus any walked edge
+                    inside a ``redact`` zone, demoted to look unwalked)
+      partial_segs: blocks walked PART-WAY (recorded but not yet complete) — drawn
+                    in the in-progress colour, between base and done
+      layers      : per-walk ``{note, color, label, km, segs}`` of COMPLETED blocks,
+                    in walk-date order
+      bbox        : ``(minx, maxx, miny, maxy)`` over the SHOWN walked edges, or None
 
     ``redact`` is a list of ``(lat, lon, radius_m)`` zones to hide. Colour is
     assigned by walk order so adding a walk never recolours the earlier ones.
@@ -93,13 +98,26 @@ def build_layers(G, store, redact=None):
               for note, date in order}
 
     base_segs = []
+    partial_segs = []                    # in-progress blocks (walked, not yet done)
     bb = [180.0, -180.0, 90.0, -90.0]
     have_walked = False
     for u, v, k, d in G.edges(keys=True, data=True):
+        if G.graph.get("amble_model") == "canonical-passages-v1" and not d.get("coverage_required"):
+            continue
         seg = _edge_xy(G, u, v, d)
-        rec = walked.get(prog.edge_id(G, u, v, k))
+        rec = prog._combined_record(prog._records_for_edge(G, u, v, k, store))
         if rec is None or _seg_in_zone(seg, zones):
-            base_segs.append(seg)                # unwalked, or redacted near home
+            base_segs.append(seg)        # never walked, or redacted near home
+            continue
+        if not prog.is_complete(rec, d.get("length", 0.0)):
+            if prog.coverage_frac(rec) >= 0.05:     # meaningfully started
+                partial_segs.append(seg)
+                have_walked = True
+                for x, y in seg:
+                    bb[0], bb[1] = min(bb[0], x), max(bb[1], x)
+                    bb[2], bb[3] = min(bb[2], y), max(bb[3], y)
+            else:
+                base_segs.append(seg)    # negligible touch — leave it unwalked-looking
             continue
         have_walked = True
         note = rec.get("note", "") or "(unlabelled)"
@@ -120,7 +138,7 @@ def build_layers(G, store, redact=None):
         layer_list.append({"note": note, "color": lyr["color"], "label": lyr["label"],
                            "km": lyr["m"] / 1000.0, "segs": lyr["segs"]})
     bbox = tuple(bb) if have_walked else None
-    return base_segs, layer_list, bbox
+    return base_segs, partial_segs, layer_list, bbox
 
 
 def _note_order(store):
@@ -177,7 +195,7 @@ def render_coverage(G, store, out_path, title="", date_label="",
     from matplotlib.collections import LineCollection
     from matplotlib.lines import Line2D
 
-    base_segs, layers, bbox = build_layers(G, store, redact=redact)
+    base_segs, partial_segs, layers, bbox = build_layers(G, store, redact=redact)
 
     # extent of what we'll draw, with one small EVEN border (no letterboxing:
     # the figure is sized to the map's aspect, so the only blank is this border)
@@ -203,6 +221,10 @@ def render_coverage(G, store, out_path, title="", date_label="",
     ax.set_facecolor(BG)
     fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
     ax.add_collection(LineCollection(base_segs, colors=STREET, linewidths=0.55, zorder=1))
+    # in-progress blocks (walked part-way, not yet done) sit between base and done
+    if partial_segs:
+        ax.add_collection(LineCollection(partial_segs, colors=PARTIAL, linewidths=1.6,
+                                         capstyle="round", zorder=2))
 
     handles = []
     if mode == "total":
